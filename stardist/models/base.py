@@ -358,6 +358,71 @@ class StarDistBase(BaseModel):
 
         return prob, dist
 
+    def predict_batch(self, imgs, axes=None, normalizer=None, **predict_kwargs):
+        """Predict.
+
+        Parameters
+        ----------
+        imgs : :class:`numpy.ndarray`
+            Input list of images
+        axes : str or None
+            Axes of the input ``img``.
+            ``None`` denotes that axes of img are the same as denoted in the config.
+        normalizer : :class:`csbdeep.data.Normalizer` or None
+            (Optional) normalization of input image before prediction.
+            Note that the default (``None``) assumes ``img`` to be already normalized.
+        n_tiles : iterable or None
+            Out of memory (OOM) errors can occur if the input image is too large.
+            To avoid this problem, the input image is broken up into (overlapping) tiles
+            that are processed independently and re-assembled.
+            This parameter denotes a tuple of the number of tiles for every image axis (see ``axes``).
+            ``None`` denotes that no tiling should be used.
+        show_tile_progress: bool
+            Whether to show progress during tiled prediction.
+        predict_kwargs: dict
+            Keyword arguments for ``predict`` function of Keras model.
+
+        Returns
+        -------
+        (:class:`numpy.ndarray`,:class:`numpy.ndarray`)
+            Returns the tuple (`prob`, `dist`) of per-pixel object probabilities and star-convex polygon/polyhedra distances.
+
+        """
+        img = imgs[0];
+        axes     = self._normalize_axes(img, axes)
+        axes_net = self.config.axes
+
+        _permute_axes = self._make_permute_axes(axes, axes_net)
+        x = _permute_axes(img) # x has axes_net semantics
+
+        channel = axes_dict(axes_net)['C']
+        self.config.n_channel_in == x.shape[channel] or _raise(ValueError())
+        axes_net_div_by = self._axes_div_by(axes_net)
+
+        grid = tuple(self.config.grid)
+        len(grid) == len(axes_net)-1 or _raise(ValueError())
+        grid_dict = dict(zip(axes_net.replace('C',''),grid))
+
+        normalizer = self._check_normalizer_resizer(normalizer, None)[0]
+        resizer = StarDistPadAndCropResizer(grid=grid_dict)
+
+        x = normalizer.before(x, axes_net)
+        x = resizer.before(x, axes_net, axes_net_div_by)
+
+        def predict_direct(tile):
+            prob, dist = self.keras_model.predict(tile[np.newaxis], **predict_kwargs)
+            return prob[0], dist[0]
+
+        prob, dist = predict_direct(x)
+
+        prob = resizer.after(prob, axes_net)
+        dist = resizer.after(dist, axes_net)
+        dist = np.maximum(1e-3, dist) # avoid small/negative dist values to prevent problems with Qhull
+
+        prob = np.take(prob,0,axis=channel)
+        dist = np.moveaxis(dist,channel,-1)
+
+        return prob, dist
 
     def predict_instances(self, img, axes=None, normalizer=None,
                           prob_thresh=None, nms_thresh=None,
